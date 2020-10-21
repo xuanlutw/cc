@@ -40,6 +40,15 @@ typedef struct {
     uint16_t  used_state_e;  
 } NFA;
 
+typedef struct {
+    NFA*  nfa;
+    bool* state_now;
+    bool* state_tmp;
+    uint16_t state_count;
+    uint16_t final_count;
+    uint16_t final_status;
+} NFA_config;
+
 Trans_record* new_trans_record() {
     Trans_record* record = malloc(sizeof(Trans_record));
     memset(record->idx, 0, sizeof(uint16_t) * TRANS_ENTRY_PER_RECORD);
@@ -55,7 +64,7 @@ void trans_add(Trans* trans, uint16_t src, uint16_t des, char symbol) {
         trans[src].record[symbol]->idx[0] = des;
         return;
     }
-    while (true) {
+    while (trans_src) {
         for (count = 0; count < TRANS_ENTRY_PER_RECORD; ++count) {
             if (trans_src->idx[count] == des)
                 return;
@@ -64,8 +73,6 @@ void trans_add(Trans* trans, uint16_t src, uint16_t des, char symbol) {
                 return;
             }
         }
-        if (!(trans_src->next))
-            break;
         trans_src = trans_src->next;
     }
     trans_src->next        = new_trans_record();
@@ -264,6 +271,101 @@ NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
     }
 }
 
+void NFA_eps_closure_s(NFA_config* nfa_config, uint16_t state) {
+    Trans_record* record = nfa_config->nfa->trans[state].record[EPS];
+    uint16_t count;
+    if (nfa_config->state_tmp[state])
+        return;
+    nfa_config->state_tmp[state] = true;
+    ++(nfa_config->state_count);
+    if (nfa_config->nfa->final_status[state])
+        ++(nfa_config->final_count);
+    if (nfa_config->nfa->final_status[state] > nfa_config->final_status)
+        nfa_config->final_status = nfa_config->nfa->final_status[state];
+    if (!record)
+        return;
+    while (record) {
+        for (count = 0; (count < TRANS_ENTRY_PER_RECORD) && \
+                        (record->idx[count] != 0); ++count) {
+            NFA_eps_closure_s(nfa_config, record->idx[count]);
+            nfa_config->state_tmp[record->idx[count]] = true;
+        }
+        record = record->next;
+    }
+    
+}
+
+void NFA_eps_closure(NFA_config* nfa_config) {
+    uint16_t count;
+    memset(nfa_config->state_tmp, 0, sizeof(bool) * MAX_REG_LEN);
+    nfa_config->state_count = 0;
+    nfa_config->final_count = 0;
+    nfa_config->final_status = 0;
+    for (count = nfa_config->nfa->used_state_s; \
+         count < nfa_config->nfa->used_state_e; ++count)
+        if (nfa_config->state_now[count])
+            NFA_eps_closure_s(nfa_config, count);
+    bool* tmp = nfa_config->state_now;
+    nfa_config->state_now = nfa_config->state_tmp;
+    nfa_config->state_tmp = tmp;
+}
+
+void NFA_move(NFA_config* nfa_config, char symbol) {
+    uint16_t state;
+    uint16_t count;
+    memset(nfa_config->state_tmp, 0, sizeof(bool) * MAX_REG_LEN);
+    for (state = nfa_config->nfa->used_state_s; \
+         state < nfa_config->nfa->used_state_e; ++state) {
+        Trans_record* record = nfa_config->nfa->trans[state].record[symbol];
+        if (!record || !(nfa_config->state_now[state]))
+            continue;
+        /*printf("%d %d\n", state, (nfa_config->state_now[state]));*/
+        /*printf("%d\n", state);*/
+        while (record) {
+            for (count = 0; (count < TRANS_ENTRY_PER_RECORD) && \
+                            (record->idx[count] != 0); ++count)
+                nfa_config->state_tmp[record->idx[count]] = true;
+            record = record->next;
+        }
+    }
+    bool* tmp = nfa_config->state_now;
+    nfa_config->state_now = nfa_config->state_tmp;
+    nfa_config->state_tmp = tmp;
+    NFA_eps_closure(nfa_config);
+}
+
+void NFA_run_init(NFA_config* nfa_config) {
+    memset(nfa_config->state_now, 0, sizeof(bool) * MAX_REG_LEN);
+    nfa_config->state_now[nfa_config->nfa->init_state] = true;
+    NFA_eps_closure(nfa_config);
+}
+
+void NFA_run(NFA* nfa, char* str) {
+    uint16_t str_pt;
+    uint16_t state;
+    bool* state_now = malloc(sizeof(bool) * MAX_REG_LEN);
+    bool* state_tmp = malloc(sizeof(bool) * MAX_REG_LEN);
+    NFA_config nfa_config ={
+        .nfa = nfa,
+        .state_now = state_now,
+        .state_tmp = state_tmp };
+    NFA_run_init(&nfa_config);
+    for (state = nfa->used_state_s; \
+         state < nfa->used_state_e; ++state)
+        if (nfa_config.state_now[state])
+            printf("%3d ", state);
+    printf("\n");
+    for (str_pt = 0; str_pt < strlen(str); ++str_pt) {
+        NFA_move(&nfa_config, str[str_pt]);  
+        printf("%c #s = %3d, f = %3d\n", str[str_pt], nfa_config.state_count, nfa_config.final_count);
+        for (state = nfa->used_state_s; \
+             state < nfa->used_state_e; ++state)
+            if (nfa_config.state_now[state])
+                printf("%3d ", state);
+        printf("\n");
+    }
+}
+
 void print(Regnode* root) {
     if (!root)
         return;
@@ -278,7 +380,7 @@ int main() {
     /*Regnode* S = convert("(a|b.c)*");*/
     /*Regnode* S = regexp_to_regnode("(a|bc)*");*/
     /*Regnode* S = regexp_to_regnode("(0|(1(01*(00)*0)*1)*)*");*/
-    Regnode* S = regexp_to_regnode("(a|b)*abb#");
+    Regnode* S = regexp_to_regnode("(a|b|#)*abb#");
     print(S);
     printf("\n");
 
@@ -288,6 +390,8 @@ int main() {
     memset(final_status, 0, sizeof(uint16_t) * MAX_REG_LEN);
     NFA nfa = regnode_to_nfa(S, trans, final_status, 1);
     print_nfa(nfa);
+
+    NFA_run(&nfa, "aaabababb#ababb#");
 
     return 0;
 }
