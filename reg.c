@@ -6,6 +6,18 @@
 
 #define MAX_REG_LEN 1000
 
+#define OP_EPS  1
+#define OP_STAR 2
+#define OP_PLUS 3
+#define OP_QUES 4
+#define OP_CON  5
+#define OP_UNI  6
+#define OP_DIG  7
+#define OP_AZ   8
+#define OP_az   9
+#define OP_Az   10
+#define OP_W    11
+
 typedef struct regnode {
     char val;
     struct regnode* left;
@@ -109,8 +121,6 @@ void print_nfa(NFA nfa) {
         if (first_time)
             printf("\n");
     }
-    /*Trans*    trans;*/
-    /*uint16_t* final_status;*/
     printf("================================\n");
 }
 
@@ -149,16 +159,29 @@ void stack_destroy(Stack* stack) {
 }
 
 void add_node(char val, Stack* stack_node) {
-    Regnode* node = new_regnode(val);
-    if (val == '*')
-        // Uniary
-        node->left = stack_pop(stack_node);
-    if (strchr("|.", val)) {
-        // Binary
-        node->right = stack_pop(stack_node);
-        node->left  = stack_pop(stack_node);
+    Regnode* node1 = new_regnode(val);
+    // Uniary
+    if (val == OP_STAR)
+        node1->left = stack_pop(stack_node);
+    if (val == OP_PLUS) {
+        Regnode* node2 = new_regnode(OP_STAR);
+        node1->val   = OP_CON;
+        node1->left  = stack_top(stack_node);
+        node1->right = node2;
+        node2->left  = stack_pop(stack_node);
     }
-    stack_push(stack_node, node);
+    if (val == OP_QUES) {
+        Regnode* node2 = new_regnode(OP_EPS);
+        node1->val   = OP_UNI;
+        node1->left  = node2;
+        node1->right = stack_pop(stack_node);
+    }
+    // Binary
+    if ((val == OP_CON) || (val == OP_UNI)) {
+        node1->right = stack_pop(stack_node);
+        node1->left  = stack_pop(stack_node);
+    }
+    stack_push(stack_node, node1);
 }
 
 Regnode* regexp_to_regnode(char* regexp) {
@@ -170,39 +193,76 @@ Regnode* regexp_to_regnode(char* regexp) {
     Stack*   stack_op   = stack_init();
     Stack*   stack_node = stack_init();
     uint16_t regexp_idx = 0;
-    char     concat     = '.';
+    char     op_con     = OP_CON;
+    char     op_uni     = OP_UNI;
+    bool     pre_symbol_term = false;
 
     for (regexp_idx = 0; regexp_idx < strlen(regexp); ++regexp_idx) { 
         if (stack_len(stack_op))
             printf(">> %c, %c, %d\n", regexp[regexp_idx],\
                    *(char*)stack_top(stack_op), stack_len(stack_op));
 
-
 /*
  * {), a, *} X {a, (}
  */
-        if (regexp_idx > 0 && \
-            !strchr("(|",  regexp[regexp_idx - 1]) &&\
-            !strchr(")*|", regexp[regexp_idx])) {
-            stack_push(stack_op, &concat);
+
+        if (regexp_idx > 0 && pre_symbol_term && \
+            !strchr(")*?+|", regexp[regexp_idx])) {
+            stack_push(stack_op, &op_con);
         }
 
-        if (regexp[regexp_idx] == '(')
+        if (regexp[regexp_idx] == '(') {
+            pre_symbol_term = false;
             stack_push(stack_op, regexp + regexp_idx);
+        }
         else if (regexp[regexp_idx] == ')') {
+            pre_symbol_term = true;
             while (*(char*)stack_top(stack_op) != '(')
                 add_node(*(char*)stack_pop(stack_op), stack_node);
             stack_pop(stack_op); // pop '('
         }
-        else if (regexp[regexp_idx] == '*')
-            add_node('*', stack_node);
-        else if (regexp[regexp_idx] == '|') {
-            while (*(char*)stack_top(stack_op) == '.')
-                add_node(*(char*)stack_pop(stack_op), stack_node);
-            stack_push(stack_op, regexp + regexp_idx);
+        else if (strchr("*", regexp[regexp_idx])) {
+            pre_symbol_term = true;
+            add_node(OP_STAR, stack_node);
         }
-        else
+        else if (strchr("+", regexp[regexp_idx])) {
+            pre_symbol_term = true;
+            add_node(OP_PLUS, stack_node);
+        }
+        else if (strchr("?", regexp[regexp_idx])) {
+            pre_symbol_term = true;
+            add_node(OP_QUES, stack_node);
+        }
+        else if (regexp[regexp_idx] == '|') {
+            pre_symbol_term = false;
+            while (stack_len(stack_op) && *(char*)stack_top(stack_op) == '.')
+                add_node(*(char*)stack_pop(stack_op), stack_node);
+            stack_push(stack_op, &op_uni);
+        }
+        else if (regexp[regexp_idx] == '\\') {
+            pre_symbol_term = true;
+            regexp_idx++;
+            if (regexp[regexp_idx] == 'e')
+                add_node(OP_EPS, stack_node);
+            else if (regexp[regexp_idx] == 'n')
+                add_node('\n', stack_node);
+            else if (regexp[regexp_idx] == 'd')
+                add_node(OP_DIG, stack_node);
+            else if (regexp[regexp_idx] == 'A')
+                add_node(OP_AZ, stack_node);
+            else if (regexp[regexp_idx] == 'a')
+                add_node(OP_az, stack_node);
+            else if (regexp[regexp_idx] == 'z')
+                add_node(OP_Az, stack_node);
+            else if (regexp[regexp_idx] == 'w')
+                add_node(OP_W, stack_node);
+            else
+                add_node(regexp[regexp_idx], stack_node);
+        }
+        else {
+            pre_symbol_term = true;
             add_node(regexp[regexp_idx], stack_node);
+        }
     }
 
     while (stack_len(stack_op))
@@ -219,7 +279,7 @@ Regnode* regexp_to_regnode(char* regexp) {
 NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
                    uint16_t start_state) {
     uint16_t count;
-    if (root->val == '*') {
+    if (root->val == OP_STAR) {
         NFA nfa = regnode_to_nfa(root->left, trans, final_status, start_state);
         uint16_t init_state  = nfa.used_state_e;
         uint16_t final_state = nfa.used_state_e + 1;
@@ -236,7 +296,7 @@ NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
         nfa.used_state_e += 2;  
         return nfa;
     }
-    else if (root->val == '|') {
+    else if (root->val == OP_UNI) {
         NFA nfa1 = regnode_to_nfa(root->left, trans, final_status, start_state);
         NFA nfa2 = regnode_to_nfa(root->right, trans, final_status, nfa1.used_state_e);
         uint16_t init_state  = nfa2.used_state_e;
@@ -246,7 +306,7 @@ NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
         nfa1.used_state_e = nfa2.used_state_e + 1;  
         return nfa1;
     }
-    else if (root->val == '.') {
+    else if (root->val == OP_CON) {
         NFA nfa1 = regnode_to_nfa(root->left, trans, final_status, start_state);
         NFA nfa2 = regnode_to_nfa(root->right, trans, final_status, nfa1.used_state_e);
         for (count = nfa1.used_state_s; count < nfa1.used_state_e; ++count)
@@ -257,6 +317,17 @@ NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
         nfa1.used_state_e = nfa2.used_state_e;
         return nfa1;
     }
+    else if (root->val == OP_EPS) {
+        NFA nfa = {
+            .trans        = trans,
+            .final_status = final_status,
+            .init_state   = start_state,  
+            .used_state_s = start_state,
+            .used_state_e = start_state + 1
+        };
+        final_status[start_state] = 1;
+        return nfa;
+    }
     else {
         NFA nfa = {
             .trans        = trans,
@@ -265,7 +336,29 @@ NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
             .used_state_s = start_state,
             .used_state_e = start_state + 2
         };
-        trans_add(trans, start_state, start_state + 1, root->val);
+        char symbol;
+        if (root->val == OP_DIG)
+            for (symbol = '0'; symbol <= '9'; ++symbol)
+                trans_add(trans, start_state, start_state + 1, symbol);
+        else if (root->val == OP_AZ)
+            for (symbol = 'A'; symbol <= 'Z'; ++symbol)
+                trans_add(trans, start_state, start_state + 1, symbol);
+        else if (root->val == OP_az)
+            for (symbol = 'a'; symbol <= 'z'; ++symbol)
+                trans_add(trans, start_state, start_state + 1, symbol);
+        else if (root->val == OP_Az) {
+            for (symbol = 'A'; symbol <= 'Z'; ++symbol)
+                trans_add(trans, start_state, start_state + 1, symbol);
+            for (symbol = 'a'; symbol <= 'z'; ++symbol)
+                trans_add(trans, start_state, start_state + 1, symbol);
+        }
+        else if (root->val == OP_W) {
+            trans_add(trans, start_state, start_state + 1, ' ');
+            trans_add(trans, start_state, start_state + 1, '\n');
+            trans_add(trans, start_state, start_state + 1, '\t');
+        }
+        else
+            trans_add(trans, start_state, start_state + 1, root->val);
         final_status[start_state + 1] = 1;
         return nfa;
     }
@@ -364,6 +457,10 @@ void NFA_run(NFA* nfa, char* str) {
                 printf("%3d ", state);
         printf("\n");
     }
+    if (nfa_config.final_status)
+        printf("ACCEPT, %d\n", nfa_config.final_status);
+    else
+        printf("REJECT\n");
 }
 
 void print(Regnode* root) {
@@ -380,7 +477,13 @@ int main() {
     /*Regnode* S = convert("(a|b.c)*");*/
     /*Regnode* S = regexp_to_regnode("(a|bc)*");*/
     /*Regnode* S = regexp_to_regnode("(0|(1(01*(00)*0)*1)*)*");*/
-    Regnode* S = regexp_to_regnode("(a|b|#)*abb#");
+    /*Regnode* S = regexp_to_regnode("(a|b|#)*abb#");*/
+    /*Regnode* S = regexp_to_regnode("(a|b|#)?abb#");*/
+    /*Regnode* S = regexp_to_regnode("\\e|((a|b|#)*abb#)");*/
+    /*Regnode* S = regexp_to_regnode("(if|a|b|#)*");*/
+    /*Regnode* S = regexp_to_regnode("\\a*");*/
+    Regnode* S = regexp_to_regnode("\\d*E-?\\d*");
+    int _sds;
     print(S);
     printf("\n");
 
@@ -391,7 +494,15 @@ int main() {
     NFA nfa = regnode_to_nfa(S, trans, final_status, 1);
     print_nfa(nfa);
 
-    NFA_run(&nfa, "aaabababb#ababb#");
+    /*NFA_run(&nfa, "aabb#abb#");*/
+    /*NFA_run(&nfa, "abb#");*/
+    /*NFA_run(&nfa, "");*/
+    /*NFA_run(&nfa, "ascas");*/
+    /*NFA_run(&nfa, "Aascas");*/
+    NFA_run(&nfa, "123");
+    NFA_run(&nfa, "123E5");
+    NFA_run(&nfa, "123E-102");
+    NFA_run(&nfa, "123ER10");
 
     return 0;
 }
