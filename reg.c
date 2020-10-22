@@ -91,6 +91,23 @@ void trans_add(Trans* trans, uint16_t src, uint16_t des, char symbol) {
     trans_src->next->idx[0] = des;
 }
 
+void trans_destroy(Trans* trans) {
+    uint16_t state;
+    uint16_t symbol;
+    Trans_record* record;
+    Trans_record* tmp;
+
+    for (state = 0; state < MAX_REG_LEN; ++state)
+        for (symbol = 0; symbol < NUM_SYMBOLS; ++symbol) {
+            record = trans[state].record[symbol];
+            while (record) {
+                tmp = record;
+                record = record->next;
+                free(tmp);
+            }
+        }
+}
+
 void print_nfa(NFA nfa) {
     printf("================================\n");
     printf("init_state: %d\n",   nfa.init_state);  
@@ -182,6 +199,36 @@ void add_node(char val, Stack* stack_node) {
         node1->left  = stack_pop(stack_node);
     }
     stack_push(stack_node, node1);
+}
+
+void node_dedag(Regnode* root) {
+    if (!(root->val))
+        return;
+    if (root->left) {
+        if (root->left->val) {
+            node_dedag(root->left);
+            root->left->val = 0;
+        }
+        else
+            root->left = NULL;
+    }
+    if (root->right) {
+        if (root->right->val) {
+            node_dedag(root->right);
+            root->right->val = 0;
+        }
+        else
+            root->right = NULL;
+    }
+}
+
+void node_destroy(Regnode* root) {
+    node_dedag(root);
+    if (root->left)
+        node_destroy(root->left);
+    if (root->right)
+        node_destroy(root->right);
+    free(root);
 }
 
 Regnode* regexp_to_regnode(char* regexp) {
@@ -436,8 +483,8 @@ void NFA_run_init(NFA_config* nfa_config) {
 void NFA_run(NFA* nfa, char* str) {
     uint16_t str_pt;
     uint16_t state;
-    bool* state_now = malloc(sizeof(bool) * MAX_REG_LEN);
-    bool* state_tmp = malloc(sizeof(bool) * MAX_REG_LEN);
+    bool state_now[MAX_REG_LEN];
+    bool state_tmp[MAX_REG_LEN];
     NFA_config nfa_config ={
         .nfa = nfa,
         .state_now = state_now,
@@ -482,8 +529,8 @@ int main() {
     /*Regnode* S = regexp_to_regnode("\\e|((a|b|#)*abb#)");*/
     /*Regnode* S = regexp_to_regnode("(if|a|b|#)*");*/
     /*Regnode* S = regexp_to_regnode("\\a*");*/
-    Regnode* S = regexp_to_regnode("\\d*E-?\\d*");
-    int _sds;
+    /*Regnode* S = regexp_to_regnode("\\d*E-?\\d*");*/
+    Regnode* S = regexp_to_regnode("\\d*(.\\d*)?");
     print(S);
     printf("\n");
 
@@ -492,6 +539,7 @@ int main() {
     memset(trans, 0, sizeof(Trans) * MAX_REG_LEN);
     memset(final_status, 0, sizeof(uint16_t) * MAX_REG_LEN);
     NFA nfa = regnode_to_nfa(S, trans, final_status, 1);
+    node_destroy(S);
     print_nfa(nfa);
 
     /*NFA_run(&nfa, "aabb#abb#");*/
@@ -499,10 +547,17 @@ int main() {
     /*NFA_run(&nfa, "");*/
     /*NFA_run(&nfa, "ascas");*/
     /*NFA_run(&nfa, "Aascas");*/
+
+    /*NFA_run(&nfa, "123");*/
+    /*NFA_run(&nfa, "123E5");*/
+    /*NFA_run(&nfa, "123E-102");*/
+    /*NFA_run(&nfa, "123ER10");*/
+
     NFA_run(&nfa, "123");
-    NFA_run(&nfa, "123E5");
-    NFA_run(&nfa, "123E-102");
-    NFA_run(&nfa, "123ER10");
+    NFA_run(&nfa, "123.");
+    NFA_run(&nfa, "123.123");
+    NFA_run(&nfa, "123.1.23");
+    trans_destroy(trans);
 
     return 0;
 }
