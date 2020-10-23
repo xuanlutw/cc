@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 #define MAX_REG_LEN 1000
 
@@ -18,137 +19,20 @@
 #define OP_Az   10
 #define OP_W    11
 
-typedef struct regnode {
-    char val;
-    struct regnode* left;
-    struct regnode* right;
-} Regnode;
-
-Regnode* new_regnode(char val) {
-    Regnode* new_node = malloc(sizeof(Regnode));
-    new_node->val     = val;
-    new_node->left    = NULL;
-    new_node->right   = NULL;
-    return new_node;
-}
-
 #define TRANS_ENTRY_PER_RECORD 16
 #define NUM_SYMBOLS 128
 #define EPS 0
-typedef struct trans_record {
-    uint16_t             idx[TRANS_ENTRY_PER_RECORD];
-    struct trans_record* next;
-} Trans_record;
 
-typedef struct trans {
-    Trans_record* record[NUM_SYMBOLS];
-} Trans;
-
-typedef struct {
-    Trans*    trans;
-    uint16_t* final_status;
-    uint16_t  init_state;  
-    uint16_t  used_state_s;  
-    uint16_t  used_state_e;  
-} NFA;
-
-typedef struct {
-    NFA*  nfa;
-    bool* state_now;
-    bool* state_tmp;
-    uint16_t state_count;
-    uint16_t final_count;
-    uint16_t final_status;
-} NFA_config;
-
-Trans_record* new_trans_record() {
-    Trans_record* record = malloc(sizeof(Trans_record));
-    memset(record->idx, 0, sizeof(uint16_t) * TRANS_ENTRY_PER_RECORD);
-    record->next = NULL;
-    return record;
-}
-
-void trans_add(Trans* trans, uint16_t src, uint16_t des, char symbol) {
-    Trans_record* trans_src = trans[src].record[symbol];
-    uint16_t count;
-    if (!trans_src) {
-        trans[src].record[symbol]         = new_trans_record();
-        trans[src].record[symbol]->idx[0] = des;
-        return;
-    }
-    while (trans_src) {
-        for (count = 0; count < TRANS_ENTRY_PER_RECORD; ++count) {
-            if (trans_src->idx[count] == des)
-                return;
-            else if (trans_src->idx[count] == 0) {
-                trans_src->idx[count] = des;
-                return;
-            }
-        }
-        trans_src = trans_src->next;
-    }
-    trans_src->next        = new_trans_record();
-    trans_src->next->idx[0] = des;
-}
-
-void trans_destroy(Trans* trans) {
-    uint16_t state;
-    uint16_t symbol;
-    Trans_record* record;
-    Trans_record* tmp;
-
-    for (state = 0; state < MAX_REG_LEN; ++state)
-        for (symbol = 0; symbol < NUM_SYMBOLS; ++symbol) {
-            record = trans[state].record[symbol];
-            while (record) {
-                tmp = record;
-                record = record->next;
-                free(tmp);
-            }
-        }
-}
-
-void print_nfa(NFA nfa) {
-    printf("================================\n");
-    printf("init_state: %d\n",   nfa.init_state);  
-    printf("used_state_s: %d\n", nfa.used_state_s);  
-    printf("used_state_e: %d\n", nfa.used_state_e);  
-    for (uint16_t count = nfa.used_state_s; count < nfa.used_state_e; ++count) {
-        bool first_time = true;
-        printf("%3d ", count);
-        for (uint16_t symbol = 0; symbol < NUM_SYMBOLS; ++symbol) {
-            Trans_record* record = nfa.trans[count].record[symbol];
-            if (!record)
-                continue;
-            if (first_time)
-                first_time = false;
-            else
-                printf("    ");
-            printf("%c ", symbol? symbol: ' ');
-            while (record) {
-                for (uint16_t idx = 0; idx < TRANS_ENTRY_PER_RECORD; ++idx)
-                    if (!(record->idx[idx]))
-                        break;
-                    else
-                        printf("%3d ", record->idx[idx]);
-                record = record->next;
-            }
-            printf("\n");
-        }
-        if (first_time)
-            printf("\n");
-    }
-    printf("================================\n");
-}
-
+// =============================================================================
 // Stack
 typedef struct {
-    void*    val[MAX_REG_LEN + 10];
+    void**   val;
     uint16_t top_pt;
 } Stack;
 
-Stack* stack_init() {
+Stack* stack_init(uint16_t max_size) {
     Stack* stack = malloc(sizeof(Stack));
+    stack->val   = calloc(sizeof(void**), max_size);
     stack->top_pt = 0;
     return stack;
 }
@@ -172,27 +56,88 @@ uint16_t stack_len(Stack* stack) {
 }
 
 void stack_destroy(Stack* stack) {
+    free(stack->val);
     free(stack);
 }
+// =============================================================================
 
-void add_node(char val, Stack* stack_node) {
-    Regnode* node1 = new_regnode(val);
+// =============================================================================
+// Parse Regular Expression
+typedef struct regnode {
+    char val;
+    struct regnode* left;
+    struct regnode* right;
+} Regnode;
+
+Regnode* regnode_init(char val) {
+    Regnode* new_node = malloc(sizeof(Regnode));
+    new_node->val     = val;
+    new_node->left    = NULL;
+    new_node->right   = NULL;
+    return new_node;
+}
+
+void regnode_print(Regnode* root) {
+    if (!root)
+        return;
+    if (isprint(root->val))
+        printf("%c", root->val);
+    else
+        printf("[%02d]", root->val);
+    regnode_print(root->left);
+    regnode_print(root->right);
+}
+
+void regnode_treelize(Regnode* root) {
+    if (!root->val)
+        return;
+    if (root->left) {
+        if (root->left->val) {
+            regnode_treelize(root->left);
+            root->left->val = 0;
+        }
+        else
+            root->left = NULL;
+    }
+    if (root->right) {
+        if (root->right->val) {
+            regnode_treelize(root->right);
+            root->right->val = 0;
+        }
+        else
+            root->right = NULL;
+    }
+}
+
+void regnode_destroy(Regnode* root) {
+    regnode_treelize(root);
+    if (root->left)
+        regnode_destroy(root->left);
+    if (root->right)
+        regnode_destroy(root->right);
+    free(root);
+}
+
+void push_regnode(char val, Stack* stack_node) {
+    Regnode* node1 = regnode_init(val);
+
     // Uniary
     if (val == OP_STAR)
         node1->left = stack_pop(stack_node);
     if (val == OP_PLUS) {
-        Regnode* node2 = new_regnode(OP_STAR);
-        node1->val   = OP_CON;
-        node1->left  = stack_top(stack_node);
-        node1->right = node2;
-        node2->left  = stack_pop(stack_node);
+        Regnode* node2 = regnode_init(OP_STAR);
+        node1->val     = OP_CON;
+        node1->left    = stack_top(stack_node);
+        node1->right   = node2;
+        node2->left    = stack_pop(stack_node);
     }
     if (val == OP_QUES) {
-        Regnode* node2 = new_regnode(OP_EPS);
-        node1->val   = OP_UNI;
-        node1->left  = node2;
-        node1->right = stack_pop(stack_node);
+        Regnode* node2 = regnode_init(OP_EPS);
+        node1->val     = OP_UNI;
+        node1->left    = node2;
+        node1->right   = stack_pop(stack_node);
     }
+
     // Binary
     if ((val == OP_CON) || (val == OP_UNI)) {
         node1->right = stack_pop(stack_node);
@@ -201,328 +146,361 @@ void add_node(char val, Stack* stack_node) {
     stack_push(stack_node, node1);
 }
 
-void node_dedag(Regnode* root) {
-    if (!(root->val))
-        return;
-    if (root->left) {
-        if (root->left->val) {
-            node_dedag(root->left);
-            root->left->val = 0;
-        }
-        else
-            root->left = NULL;
-    }
-    if (root->right) {
-        if (root->right->val) {
-            node_dedag(root->right);
-            root->right->val = 0;
-        }
-        else
-            root->right = NULL;
-    }
-}
-
-void node_destroy(Regnode* root) {
-    node_dedag(root);
-    if (root->left)
-        node_destroy(root->left);
-    if (root->right)
-        node_destroy(root->right);
-    free(root);
-}
-
 Regnode* regexp_to_regnode(char* regexp) {
+    Stack*   stack_op        = stack_init(strlen(regexp) * 2);
+    Stack*   stack_node      = stack_init(strlen(regexp) * 2);
+    uint16_t regexp_idx      = 0;
+    char     op_con          = OP_CON;
+    char     op_uni          = OP_UNI;
+    bool     pre_symbol_term = false;
+
+
     if (strlen(regexp) > MAX_REG_LEN) {
         printf("Regexp tooooo long\n");
         exit(-1);
     }
 
-    Stack*   stack_op   = stack_init();
-    Stack*   stack_node = stack_init();
-    uint16_t regexp_idx = 0;
-    char     op_con     = OP_CON;
-    char     op_uni     = OP_UNI;
-    bool     pre_symbol_term = false;
-
     for (regexp_idx = 0; regexp_idx < strlen(regexp); ++regexp_idx) { 
-        if (stack_len(stack_op))
-            printf(">> %c, %c, %d\n", regexp[regexp_idx],\
-                   *(char*)stack_top(stack_op), stack_len(stack_op));
-
-/*
- * {), a, *} X {a, (}
- */
-
-        if (regexp_idx > 0 && pre_symbol_term && \
-            !strchr(")*?+|", regexp[regexp_idx])) {
+        // Add omit concat
+        if (pre_symbol_term && !strchr(")*?+|", regexp[regexp_idx]))
             stack_push(stack_op, &op_con);
-        }
 
-        if (regexp[regexp_idx] == '(') {
-            pre_symbol_term = false;
-            stack_push(stack_op, regexp + regexp_idx);
-        }
-        else if (regexp[regexp_idx] == ')') {
-            pre_symbol_term = true;
-            while (*(char*)stack_top(stack_op) != '(')
-                add_node(*(char*)stack_pop(stack_op), stack_node);
-            stack_pop(stack_op); // pop '('
-        }
-        else if (strchr("*", regexp[regexp_idx])) {
-            pre_symbol_term = true;
-            add_node(OP_STAR, stack_node);
-        }
-        else if (strchr("+", regexp[regexp_idx])) {
-            pre_symbol_term = true;
-            add_node(OP_PLUS, stack_node);
-        }
-        else if (strchr("?", regexp[regexp_idx])) {
-            pre_symbol_term = true;
-            add_node(OP_QUES, stack_node);
-        }
-        else if (regexp[regexp_idx] == '|') {
-            pre_symbol_term = false;
-            while (stack_len(stack_op) && *(char*)stack_top(stack_op) == '.')
-                add_node(*(char*)stack_pop(stack_op), stack_node);
-            stack_push(stack_op, &op_uni);
-        }
-        else if (regexp[regexp_idx] == '\\') {
-            pre_symbol_term = true;
-            regexp_idx++;
-            if (regexp[regexp_idx] == 'e')
-                add_node(OP_EPS, stack_node);
-            else if (regexp[regexp_idx] == 'n')
-                add_node('\n', stack_node);
-            else if (regexp[regexp_idx] == 'd')
-                add_node(OP_DIG, stack_node);
-            else if (regexp[regexp_idx] == 'A')
-                add_node(OP_AZ, stack_node);
-            else if (regexp[regexp_idx] == 'a')
-                add_node(OP_az, stack_node);
-            else if (regexp[regexp_idx] == 'z')
-                add_node(OP_Az, stack_node);
-            else if (regexp[regexp_idx] == 'w')
-                add_node(OP_W, stack_node);
-            else
-                add_node(regexp[regexp_idx], stack_node);
-        }
-        else {
-            pre_symbol_term = true;
-            add_node(regexp[regexp_idx], stack_node);
+        // Parse
+        switch (regexp[regexp_idx]) {
+            case '(':
+                pre_symbol_term = false;
+                stack_push(stack_op, regexp + regexp_idx);
+                break;
+            case ')':
+                pre_symbol_term = true;
+                while (*(char*)stack_top(stack_op) != '(')
+                    push_regnode(*(char*)stack_pop(stack_op), stack_node);
+                stack_pop(stack_op); // pop '('
+                break;
+            case '*':
+                pre_symbol_term = true;
+                push_regnode(OP_STAR, stack_node);
+                break;
+            case '+':
+                pre_symbol_term = true;
+                push_regnode(OP_PLUS, stack_node);
+                break;
+            case '?':
+                pre_symbol_term = true;
+                push_regnode(OP_QUES, stack_node);
+                break;
+            case '|':
+                pre_symbol_term = false;
+                while (stack_len(stack_op) && *(char*)stack_top(stack_op) == OP_CON)
+                    push_regnode(*(char*)stack_pop(stack_op), stack_node);
+                stack_push(stack_op, &op_uni);
+                break;
+            case '\\':
+                pre_symbol_term = true;
+                regexp_idx++;
+                if (regexp[regexp_idx] == 'e')
+                    push_regnode(OP_EPS, stack_node);
+                else if (regexp[regexp_idx] == 'n')
+                    push_regnode('\n', stack_node);
+                else if (regexp[regexp_idx] == 'd')
+                    push_regnode(OP_DIG, stack_node);
+                else if (regexp[regexp_idx] == 'A')
+                    push_regnode(OP_AZ, stack_node);
+                else if (regexp[regexp_idx] == 'a')
+                    push_regnode(OP_az, stack_node);
+                else if (regexp[regexp_idx] == 'z')
+                    push_regnode(OP_Az, stack_node);
+                else if (regexp[regexp_idx] == 'w')
+                    push_regnode(OP_W, stack_node);
+                else
+                    push_regnode(regexp[regexp_idx], stack_node);
+                break;
+            default:
+                pre_symbol_term = true;
+                push_regnode(regexp[regexp_idx], stack_node);
         }
     }
 
     while (stack_len(stack_op))
-        add_node(*(char*)stack_pop(stack_op), stack_node);
-    printf("FINAL %d %d \n", stack_len(stack_op), stack_len(stack_node));
-    Regnode* ret =  stack_top(stack_node);
-
+        push_regnode(*(char*)stack_pop(stack_op), stack_node);
+    printf("Parse regexp done, remain op = %d. remain node = %d\n", \
+           stack_len(stack_op), stack_len(stack_node));
+    Regnode* root = stack_top(stack_node);
     stack_destroy(stack_op);
     stack_destroy(stack_node);
+    return root;
+}
+// =============================================================================
 
-    return ret;
+// =============================================================================
+// NFA
+typedef struct trans {
+    void*         des[TRANS_ENTRY_PER_RECORD];
+    struct trans* next;
+} Trans;
+
+typedef struct state {
+    Trans*        trans[NUM_SYMBOLS];
+    uint16_t      final_status;
+    bool          select_now;
+    bool          select_tmp;
+    struct state* next;
+} State;
+
+Trans* trans_init() {
+    Trans* trans = malloc(sizeof(Trans));
+    memset(trans->des, 0, sizeof(void*) * TRANS_ENTRY_PER_RECORD);
+    trans->next = NULL;
+    return trans;
 }
 
-NFA regnode_to_nfa(Regnode* root, Trans* trans, uint16_t* final_status, \
-                   uint16_t start_state) {
+Trans* trans_add_des(Trans* trans, State* des) {
+    uint16_t count;
+    if (!trans) {
+        trans         = trans_init();
+        trans->des[0] = des;
+        return trans;
+    }
+    for (count = 0; count < TRANS_ENTRY_PER_RECORD; ++count) {
+        if (trans->des[count] == des)
+            return trans;
+        else if (!trans->des[count]) {
+            trans->des[count] = des;
+            return trans;
+        }
+    }
+    trans->next = trans_add_des(trans->next, des);
+    return trans;
+}
+
+void trans_add(State* src, char symbol, State* des) {
+    src->trans[symbol] = trans_add_des(src->trans[symbol], des);
+}
+
+void trans_destroy(Trans* trans) {
+    if (!trans)
+        return;
+    trans_destroy(trans->next);
+    free(trans);
+}
+
+State* state_init(uint16_t final_status, State* next) {
+    State* state        = malloc(sizeof(State));
+    state->final_status = final_status;
+    state->next         = next;
+    memset(state->trans, 0, sizeof(Trans*) * NUM_SYMBOLS);
+    return state;
+}
+
+void state_append(State* src, State* des) {
+    if (src->next)
+        state_append(src->next, des);
+    else
+        src->next = des;
+}
+
+void state_clean_select(State* src) {
+    if (src) {
+        src->select_tmp = false;
+        state_clean_select(src->next);
+    }
+}
+
+void state_copy_select(State* src) {
+    if (src) {
+        src->select_now = src->select_tmp;
+        state_copy_select(src->next);
+    }
+}
+
+void state_destroy(State* src) {
+    uint16_t symbol;
+    if (src) {
+        for (symbol = 0; symbol < NUM_SYMBOLS; ++symbol)
+            trans_destroy(src->trans[symbol]);
+        state_destroy(src->next);
+        free(src);
+    }
+}
+
+void print_nfa(State* state) {
+    uint16_t symbol;
+    uint16_t idx;
+    printf("================================\n");
+    for (; state; state = state->next) {
+        printf("%p:\n", state);
+        for (symbol = 0; symbol < NUM_SYMBOLS; ++symbol) {
+            Trans* trans = state->trans[symbol];
+            if (!trans)
+                continue;
+            printf("\t%c: ", symbol? symbol: ' ');
+            while (trans) {
+                for (idx = 0; idx < TRANS_ENTRY_PER_RECORD; ++idx)
+                    if (trans->des[idx])
+                        printf("%p ", trans->des[idx]);
+                    else
+                        break;
+                trans = trans->next;
+            }
+            printf("\n");
+        }
+    }
+}
+
+State* regnode_to_nfa(Regnode* root) {
     uint16_t count;
     if (root->val == OP_STAR) {
-        NFA nfa = regnode_to_nfa(root->left, trans, final_status, start_state);
-        uint16_t init_state  = nfa.used_state_e;
-        uint16_t final_state = nfa.used_state_e + 1;
-        trans_add(trans, init_state, nfa.init_state, EPS);
-        trans_add(trans, init_state, final_state, EPS);
-        for (count = nfa.used_state_s; count < nfa.used_state_e; ++count)
-            if (nfa.final_status[count]) {
-                nfa.final_status[count] = 0;
-                trans_add(trans, count, nfa.init_state, EPS);
-                trans_add(trans, count, final_state, EPS);
+        State* nfa         = regnode_to_nfa(root->left);
+        State* final_state = state_init(1, nfa);
+        State* init_state  = state_init(0, final_state);
+        State* state;
+        trans_add(init_state, EPS, nfa);
+        trans_add(init_state, EPS, final_state);
+        for (state = nfa; state; state = state->next)
+            if (state->final_status) {
+                state->final_status = 0;
+                trans_add(state, EPS, nfa);
+                trans_add(state, EPS, final_state);
             }
-        nfa.final_status[final_state] = 1;
-        nfa.init_state = init_state;  
-        nfa.used_state_e += 2;  
-        return nfa;
+        return init_state;
     }
     else if (root->val == OP_UNI) {
-        NFA nfa1 = regnode_to_nfa(root->left, trans, final_status, start_state);
-        NFA nfa2 = regnode_to_nfa(root->right, trans, final_status, nfa1.used_state_e);
-        uint16_t init_state  = nfa2.used_state_e;
-        trans_add(trans, init_state, nfa1.init_state, EPS);
-        trans_add(trans, init_state, nfa2.init_state, EPS);
-        nfa1.init_state = init_state;  
-        nfa1.used_state_e = nfa2.used_state_e + 1;  
-        return nfa1;
+        State* nfa1        = regnode_to_nfa(root->left);
+        State* nfa2        = regnode_to_nfa(root->right);
+        State* init_state  = state_init(0, nfa1);
+        state_append(init_state, nfa2);
+        trans_add(init_state, EPS, nfa1);
+        trans_add(init_state, EPS, nfa2);
+        return init_state;
     }
     else if (root->val == OP_CON) {
-        NFA nfa1 = regnode_to_nfa(root->left, trans, final_status, start_state);
-        NFA nfa2 = regnode_to_nfa(root->right, trans, final_status, nfa1.used_state_e);
-        for (count = nfa1.used_state_s; count < nfa1.used_state_e; ++count)
-            if (nfa1.final_status[count]) {
-                nfa1.final_status[count] = 0;
-                trans_add(trans, count, nfa2.init_state, EPS);
+        State* nfa1  = regnode_to_nfa(root->left);
+        State* nfa2  = regnode_to_nfa(root->right);
+        State* state;
+        for (state = nfa1; state; state = state->next)
+            if (state->final_status) {
+                state->final_status = 0;
+                trans_add(state, EPS, nfa2);
             }
-        nfa1.used_state_e = nfa2.used_state_e;
+        state_append(nfa1, nfa2);
         return nfa1;
     }
     else if (root->val == OP_EPS) {
-        NFA nfa = {
-            .trans        = trans,
-            .final_status = final_status,
-            .init_state   = start_state,  
-            .used_state_s = start_state,
-            .used_state_e = start_state + 1
-        };
-        final_status[start_state] = 1;
-        return nfa;
+        State* init_state = state_init(1, NULL);
+        return init_state;
     }
     else {
-        NFA nfa = {
-            .trans        = trans,
-            .final_status = final_status,
-            .init_state   = start_state,  
-            .used_state_s = start_state,
-            .used_state_e = start_state + 2
-        };
+        State* final_state = state_init(1, NULL);
+        State* init_state  = state_init(0, final_state);
         char symbol;
         if (root->val == OP_DIG)
             for (symbol = '0'; symbol <= '9'; ++symbol)
-                trans_add(trans, start_state, start_state + 1, symbol);
+                trans_add(init_state, symbol, final_state);
         else if (root->val == OP_AZ)
             for (symbol = 'A'; symbol <= 'Z'; ++symbol)
-                trans_add(trans, start_state, start_state + 1, symbol);
+                trans_add(init_state, symbol, final_state);
         else if (root->val == OP_az)
             for (symbol = 'a'; symbol <= 'z'; ++symbol)
-                trans_add(trans, start_state, start_state + 1, symbol);
+                trans_add(init_state, symbol, final_state);
         else if (root->val == OP_Az) {
             for (symbol = 'A'; symbol <= 'Z'; ++symbol)
-                trans_add(trans, start_state, start_state + 1, symbol);
+                trans_add(init_state, symbol, final_state);
             for (symbol = 'a'; symbol <= 'z'; ++symbol)
-                trans_add(trans, start_state, start_state + 1, symbol);
+                trans_add(init_state, symbol, final_state);
         }
         else if (root->val == OP_W) {
-            trans_add(trans, start_state, start_state + 1, ' ');
-            trans_add(trans, start_state, start_state + 1, '\n');
-            trans_add(trans, start_state, start_state + 1, '\t');
+            trans_add(init_state, ' ', final_state);
+            trans_add(init_state, '\n', final_state);
+            trans_add(init_state, '\t', final_state);
         }
         else
-            trans_add(trans, start_state, start_state + 1, root->val);
-        final_status[start_state + 1] = 1;
-        return nfa;
+            trans_add(init_state, root->val, final_state);
+        return init_state;
     }
 }
 
-void NFA_eps_closure_s(NFA_config* nfa_config, uint16_t state) {
-    Trans_record* record = nfa_config->nfa->trans[state].record[EPS];
+void state_eps_closure(State* state, uint16_t* select_count, uint16_t* final_status) {
+    Trans* trans;
     uint16_t count;
-    if (nfa_config->state_tmp[state])
+
+    if (state->select_tmp)
         return;
-    nfa_config->state_tmp[state] = true;
-    ++(nfa_config->state_count);
-    if (nfa_config->nfa->final_status[state])
-        ++(nfa_config->final_count);
-    if (nfa_config->nfa->final_status[state] > nfa_config->final_status)
-        nfa_config->final_status = nfa_config->nfa->final_status[state];
-    if (!record)
-        return;
-    while (record) {
-        for (count = 0; (count < TRANS_ENTRY_PER_RECORD) && \
-                        (record->idx[count] != 0); ++count) {
-            NFA_eps_closure_s(nfa_config, record->idx[count]);
-            nfa_config->state_tmp[record->idx[count]] = true;
-        }
-        record = record->next;
-    }
-    
+    state->select_tmp = true;
+    ++(*select_count);
+    if (state->final_status > (*final_status))
+        (*final_status) = state->final_status;
+
+    for (trans = state->trans[EPS]; trans; trans = trans->next)
+        for (count = 0; \
+                (count < TRANS_ENTRY_PER_RECORD) && (trans->des[count]); ++count)
+            if (!((State*)trans->des[count])->select_tmp)
+                state_eps_closure(trans->des[count], select_count, final_status);
 }
 
-void NFA_eps_closure(NFA_config* nfa_config) {
+void NFA_eps_closure(State* NFA, uint16_t* select_count, uint16_t* final_status) {
+    State* state;
+    state_clean_select(NFA);
+    *select_count = 0;
+    *final_status = 0;
+    for (state = NFA; state; state = state->next)
+        if (state->select_now)
+            state_eps_closure(state, select_count, final_status);
+    state_copy_select(NFA);
+}
+
+void NFA_move(State* NFA, uint16_t* select_count, uint16_t* final_status, char symbol) {
+    State* state;
+    Trans* trans;
     uint16_t count;
-    memset(nfa_config->state_tmp, 0, sizeof(bool) * MAX_REG_LEN);
-    nfa_config->state_count = 0;
-    nfa_config->final_count = 0;
-    nfa_config->final_status = 0;
-    for (count = nfa_config->nfa->used_state_s; \
-         count < nfa_config->nfa->used_state_e; ++count)
-        if (nfa_config->state_now[count])
-            NFA_eps_closure_s(nfa_config, count);
-    bool* tmp = nfa_config->state_now;
-    nfa_config->state_now = nfa_config->state_tmp;
-    nfa_config->state_tmp = tmp;
+    state_clean_select(NFA);
+    for (state = NFA; state; state = state->next)
+        for (trans = state->trans[symbol]; state->select_now && trans; trans = trans->next)
+            for (count = 0; \
+                    (count < TRANS_ENTRY_PER_RECORD) && (trans->des[count]); ++count)
+                ((State*)trans->des[count])->select_tmp = true;
+    state_copy_select(NFA);
+    NFA_eps_closure(NFA, select_count, final_status);
 }
 
-void NFA_move(NFA_config* nfa_config, char symbol) {
-    uint16_t state;
-    uint16_t count;
-    memset(nfa_config->state_tmp, 0, sizeof(bool) * MAX_REG_LEN);
-    for (state = nfa_config->nfa->used_state_s; \
-         state < nfa_config->nfa->used_state_e; ++state) {
-        Trans_record* record = nfa_config->nfa->trans[state].record[symbol];
-        if (!record || !(nfa_config->state_now[state]))
-            continue;
-        /*printf("%d %d\n", state, (nfa_config->state_now[state]));*/
-        /*printf("%d\n", state);*/
-        while (record) {
-            for (count = 0; (count < TRANS_ENTRY_PER_RECORD) && \
-                            (record->idx[count] != 0); ++count)
-                nfa_config->state_tmp[record->idx[count]] = true;
-            record = record->next;
-        }
-    }
-    bool* tmp = nfa_config->state_now;
-    nfa_config->state_now = nfa_config->state_tmp;
-    nfa_config->state_tmp = tmp;
-    NFA_eps_closure(nfa_config);
+void NFA_init(State* NFA, uint16_t* select_count, uint16_t* final_status) {
+    state_clean_select(NFA);
+    *select_count = 0;
+    *final_status = 0;
+    state_eps_closure(NFA, select_count, final_status);
+    state_copy_select(NFA);
 }
 
-void NFA_run_init(NFA_config* nfa_config) {
-    memset(nfa_config->state_now, 0, sizeof(bool) * MAX_REG_LEN);
-    nfa_config->state_now[nfa_config->nfa->init_state] = true;
-    NFA_eps_closure(nfa_config);
-}
-
-void NFA_run(NFA* nfa, char* str) {
+void NFA_run(State* NFA, char* str) {
     uint16_t str_pt;
-    uint16_t state;
-    bool state_now[MAX_REG_LEN];
-    bool state_tmp[MAX_REG_LEN];
-    NFA_config nfa_config ={
-        .nfa = nfa,
-        .state_now = state_now,
-        .state_tmp = state_tmp };
-    NFA_run_init(&nfa_config);
-    for (state = nfa->used_state_s; \
-         state < nfa->used_state_e; ++state)
-        if (nfa_config.state_now[state])
-            printf("%3d ", state);
+    uint16_t select_count;
+    uint16_t final_status;
+    State* state;
+    NFA_init(NFA, &select_count, &final_status);
+    printf("================================\n\t");
+    for (state = NFA; state; state = state->next)
+        if (state->select_now)
+            printf("%p ", state);
     printf("\n");
     for (str_pt = 0; str_pt < strlen(str); ++str_pt) {
-        NFA_move(&nfa_config, str[str_pt]);  
-        printf("%c #s = %3d, f = %3d\n", str[str_pt], nfa_config.state_count, nfa_config.final_count);
-        for (state = nfa->used_state_s; \
-             state < nfa->used_state_e; ++state)
-            if (nfa_config.state_now[state])
-                printf("%3d ", state);
+        NFA_move(NFA, &select_count, &final_status, str[str_pt]);  
+        printf("%c, #s = %3d, f = %3d\n\t", str[str_pt], select_count, final_status);
+        for (state = NFA; state; state = state->next)
+            if (state->select_now)
+                printf("%p ", state);
         printf("\n");
     }
-    if (nfa_config.final_status)
-        printf("ACCEPT, %d\n", nfa_config.final_status);
+    if (final_status)
+        printf("ACCEPT by status %d\n", final_status);
     else
         printf("REJECT\n");
 }
-
-void print(Regnode* root) {
-    if (!root)
-        return;
-    print(root->left);
-    printf("%c", root->val);
-    print(root->right);
-}
+// =============================================================================
 
 int main() {
     /*Regnode* S = convert("(a|b)*.a.b.b.#");*/
     /*Regnode* S = convert("(0|(1.(0.1*.(0.0)*.0)*.1)*)*");*/
     /*Regnode* S = convert("(a|b.c)*");*/
-    /*Regnode* S = regexp_to_regnode("(a|bc)*");*/
+    Regnode* S = regexp_to_regnode("(bc|a)*");
     /*Regnode* S = regexp_to_regnode("(0|(1(01*(00)*0)*1)*)*");*/
     /*Regnode* S = regexp_to_regnode("(a|b|#)*abb#");*/
     /*Regnode* S = regexp_to_regnode("(a|b|#)?abb#");*/
@@ -530,16 +508,12 @@ int main() {
     /*Regnode* S = regexp_to_regnode("(if|a|b|#)*");*/
     /*Regnode* S = regexp_to_regnode("\\a*");*/
     /*Regnode* S = regexp_to_regnode("\\d*E-?\\d*");*/
-    Regnode* S = regexp_to_regnode("\\d*(.\\d*)?");
-    print(S);
+    /*Regnode* S = regexp_to_regnode("\\d*(.\\d*)?");*/
+    regnode_print(S);
     printf("\n");
 
-    Trans    trans[MAX_REG_LEN];
-    uint16_t final_status[MAX_REG_LEN];
-    memset(trans, 0, sizeof(Trans) * MAX_REG_LEN);
-    memset(final_status, 0, sizeof(uint16_t) * MAX_REG_LEN);
-    NFA nfa = regnode_to_nfa(S, trans, final_status, 1);
-    node_destroy(S);
+    State* nfa = regnode_to_nfa(S);
+    regnode_destroy(S);
     print_nfa(nfa);
 
     /*NFA_run(&nfa, "aabb#abb#");*/
@@ -553,11 +527,16 @@ int main() {
     /*NFA_run(&nfa, "123E-102");*/
     /*NFA_run(&nfa, "123ER10");*/
 
-    NFA_run(&nfa, "123");
-    NFA_run(&nfa, "123.");
-    NFA_run(&nfa, "123.123");
-    NFA_run(&nfa, "123.1.23");
-    trans_destroy(trans);
+    /*NFA_run(&nfa, "123");*/
+    /*NFA_run(&nfa, "123.");*/
+    /*NFA_run(&nfa, "123.123");*/
+    /*NFA_run(&nfa, "123.1.23");*/
+
+    NFA_run(nfa, "");
+    NFA_run(nfa, "a");
+    NFA_run(nfa, "abc");
+    NFA_run(nfa, "ac");
+    state_destroy(nfa);
 
     return 0;
 }
