@@ -6,6 +6,7 @@
 #include <ctype.h>
 
 #define MAX_REG_LEN 1000
+#define MAX_TOKEN_LEN 100
 
 #define OP_EPS  1
 #define OP_STAR 2
@@ -19,7 +20,7 @@
 #define OP_Az   10
 #define OP_W    11
 
-#define TRANS_ENTRY_PER_RECORD 16
+#define TRANS_ENTRY_PER_RECORD 4
 #define NUM_SYMBOLS 128
 #define EPS 0
 
@@ -326,32 +327,27 @@ void state_destroy(State* src) {
 void print_nfa(State* state) {
     uint16_t symbol;
     uint16_t idx;
+    Trans* trans;
     printf("================================\n");
     for (; state; state = state->next) {
-        printf("%p:\n", state);
+        printf("%2d %p:\n", state->final_status, state);
         for (symbol = 0; symbol < NUM_SYMBOLS; ++symbol) {
-            Trans* trans = state->trans[symbol];
-            if (!trans)
+            if (!state->trans[symbol])
                 continue;
             printf("\t%c: ", symbol? symbol: ' ');
-            while (trans) {
-                for (idx = 0; idx < TRANS_ENTRY_PER_RECORD; ++idx)
-                    if (trans->des[idx])
-                        printf("%p ", trans->des[idx]);
-                    else
-                        break;
-                trans = trans->next;
-            }
+            for (trans = state->trans[symbol]; trans; trans = trans->next)
+                for (idx = 0; (idx < TRANS_ENTRY_PER_RECORD) && (trans->des[idx]); ++idx)
+                    printf("%p ", trans->des[idx]);
             printf("\n");
         }
     }
 }
 
-State* regnode_to_nfa(Regnode* root) {
+State* regnode_to_nfa(Regnode* root, uint16_t final_status) {
     uint16_t count;
     if (root->val == OP_STAR) {
-        State* nfa         = regnode_to_nfa(root->left);
-        State* final_state = state_init(1, nfa);
+        State* nfa         = regnode_to_nfa(root->left, final_status);
+        State* final_state = state_init(final_status, nfa);
         State* init_state  = state_init(0, final_state);
         State* state;
         trans_add(init_state, EPS, nfa);
@@ -365,8 +361,8 @@ State* regnode_to_nfa(Regnode* root) {
         return init_state;
     }
     else if (root->val == OP_UNI) {
-        State* nfa1        = regnode_to_nfa(root->left);
-        State* nfa2        = regnode_to_nfa(root->right);
+        State* nfa1        = regnode_to_nfa(root->left, final_status);
+        State* nfa2        = regnode_to_nfa(root->right, final_status);
         State* init_state  = state_init(0, nfa1);
         state_append(init_state, nfa2);
         trans_add(init_state, EPS, nfa1);
@@ -374,8 +370,8 @@ State* regnode_to_nfa(Regnode* root) {
         return init_state;
     }
     else if (root->val == OP_CON) {
-        State* nfa1  = regnode_to_nfa(root->left);
-        State* nfa2  = regnode_to_nfa(root->right);
+        State* nfa1  = regnode_to_nfa(root->left, final_status);
+        State* nfa2  = regnode_to_nfa(root->right, final_status);
         State* state;
         for (state = nfa1; state; state = state->next)
             if (state->final_status) {
@@ -386,11 +382,11 @@ State* regnode_to_nfa(Regnode* root) {
         return nfa1;
     }
     else if (root->val == OP_EPS) {
-        State* init_state = state_init(1, NULL);
+        State* init_state = state_init(final_status, NULL);
         return init_state;
     }
     else {
-        State* final_state = state_init(1, NULL);
+        State* final_state = state_init(final_status, NULL);
         State* init_state  = state_init(0, final_state);
         char symbol;
         if (root->val == OP_DIG)
@@ -409,7 +405,7 @@ State* regnode_to_nfa(Regnode* root) {
                 trans_add(init_state, symbol, final_state);
         }
         else if (root->val == OP_W) {
-            trans_add(init_state, ' ', final_state);
+            trans_add(init_state, ' ',  final_state);
             trans_add(init_state, '\n', final_state);
             trans_add(init_state, '\t', final_state);
         }
@@ -496,47 +492,237 @@ void NFA_run(State* NFA, char* str) {
 }
 // =============================================================================
 
-int main() {
-    /*Regnode* S = convert("(a|b)*.a.b.b.#");*/
-    /*Regnode* S = convert("(0|(1.(0.1*.(0.0)*.0)*.1)*)*");*/
-    /*Regnode* S = convert("(a|b.c)*");*/
-    Regnode* S = regexp_to_regnode("(bc|a)*");
-    /*Regnode* S = regexp_to_regnode("(0|(1(01*(00)*0)*1)*)*");*/
-    /*Regnode* S = regexp_to_regnode("(a|b|#)*abb#");*/
-    /*Regnode* S = regexp_to_regnode("(a|b|#)?abb#");*/
-    /*Regnode* S = regexp_to_regnode("\\e|((a|b|#)*abb#)");*/
-    /*Regnode* S = regexp_to_regnode("(if|a|b|#)*");*/
-    /*Regnode* S = regexp_to_regnode("\\a*");*/
-    /*Regnode* S = regexp_to_regnode("\\d*E-?\\d*");*/
-    /*Regnode* S = regexp_to_regnode("\\d*(.\\d*)?");*/
-    regnode_print(S);
-    printf("\n");
+// =============================================================================
+// Symbol Table
+#define SYMBOL_NUM 1009
 
-    State* nfa = regnode_to_nfa(S);
-    regnode_destroy(S);
-    print_nfa(nfa);
+typedef struct {
+    uint16_t class;
+    char*    content;
+} Symbol;
+
+typedef struct {
+    Symbol symbol[SYMBOL_NUM];
+    uint16_t count;
+} Symbol_Table;
+
+Symbol_Table* symbol_table_init() {
+    Symbol_Table* table = malloc(sizeof(Symbol_Table));
+    memset(table->symbol, 0, SYMBOL_NUM * sizeof(Symbol));
+    return table;
+}
+
+uint16_t BKDR_hash(char* str) {
+    uint16_t seed = 131;
+    uint16_t hash = 0;
+    for (; *str; ++str)
+        hash = (hash * seed + *str) % SYMBOL_NUM;
+    return hash;
+}
+
+Symbol* push_symbol(Symbol_Table* table, uint16_t class, char* content) {
+    uint16_t hash = BKDR_hash(content);
+
+    if (table->count >= SYMBOL_NUM) {
+        printf("TOO MANY SYMBOL\n");
+        exit(-1);
+    }
+    for (;; hash = (hash + 1) % SYMBOL_NUM)
+        if (!table->symbol[hash].content) {
+            table->symbol[hash].content = malloc(sizeof(char) * (strlen(content) + 1));
+            table->symbol[hash].class   = class;
+            strcpy(table->symbol[hash].content, content);
+            return table->symbol + hash;
+        }
+        else if (table->symbol[hash].class == class && \
+                !strcmp(table->symbol[hash].content, content))
+            return table->symbol + hash;
+}
+
+// =============================================================================
+// Lexical
+#define MAX_KEYWORD_LEN 10
+
+#define CLASS_WHITE      1
+#define CLASS_IDENTIFIER 2
+#define CLASS_NUMBER     3
+#define CLASS_KEYWORD    4
+#define CLASS_OPERATOR   5
+#define CLASS_PUNCTUATOR 6
+
+union Token_content {
+    char     c[MAX_KEYWORD_LEN];
+    int64_t  d;
+    Symbol*  s; 
+};
+
+typedef struct {
+    uint16_t            class;
+    union Token_content content;
+} Token;
+
+typedef struct {
+    State*   nfa; 
+    FILE*    stream;
+    uint16_t final_status;
+    Token*   (*post_process)(uint16_t, char*, Symbol_Table*);
+} Lex;
+
+Lex* lex_init(char* input_filename, Token* (*post_process)(uint16_t, char*, Symbol_Table*)) {
+    Lex* lex          = malloc(sizeof(Lex));
+    lex->nfa          = state_init(0, NULL);
+    lex->stream       = fopen(input_filename, "r");
+    lex->final_status = 0;
+    lex->post_process = post_process;
+
+    return lex;
+}
+
+void lex_destroy(Lex* lex) {
+    fclose(lex->stream);
+    state_destroy(lex->nfa);
+    free(lex);
+}
+
+void lex_append_rule(Lex* lex, char* rule, uint16_t final_status) {
+    Regnode* root;
+    State*   nfa;
+    root = regexp_to_regnode(rule);
+    nfa  = regnode_to_nfa(root, final_status);
+    state_append(lex->nfa, nfa);
+    trans_add(lex->nfa, EPS, nfa);
+    /*print_nfa(nfa);*/
+    /*regnode_print(root);*/
+    /*printf("\n");*/
+    regnode_destroy(root);
+}
+
+Token* lex_get_token(Lex* lex, Symbol_Table* table) {
+    char symbol;
+    char content[MAX_TOKEN_LEN];
+    uint16_t select_count;
+    uint16_t final_status;
+    uint16_t pre_final_status;
+    uint64_t content_pos_s = ftell(lex->stream);
+    uint64_t content_pos_e;
+    Token* token;
+
+    NFA_init(lex->nfa, &select_count, &final_status);
+    lex->final_status = 0;
+
+    while (fread(&symbol, sizeof(char), 1, lex->stream)) {
+        NFA_move(lex->nfa, &select_count, &final_status, symbol);  
+        if (!select_count) {
+            if (lex->final_status) {
+                content_pos_e = ftell(lex->stream) - 1;
+                fseek(lex->stream, content_pos_s, SEEK_SET);
+                fread(content, sizeof(char), content_pos_e - content_pos_s, lex->stream); 
+                content[content_pos_e - content_pos_s] = 0;
+                /*printf("%d %s\n", lex->final_status, content);*/
+            }
+            else
+                printf("Lexical Error\n");
+            token = lex->post_process(lex->final_status, content, table);
+            if (token)
+                return token;
+            else
+                return lex_get_token(lex, table);
+
+        }
+        else
+            lex->final_status = final_status;
+    }
+    return NULL;
+}
+// =============================================================================
+
+Token* lex_post_process(uint16_t final_status, char* content, Symbol_Table* table) {
+    if (final_status == CLASS_WHITE)
+        return NULL;
+
+    Token* token = malloc(sizeof(Token));
+    token->class = final_status;
+    switch (final_status) {
+        case CLASS_IDENTIFIER:
+            token->content.s = push_symbol(table, final_status, content);
+            return token;
+        case CLASS_NUMBER:
+            token->content.d = atoi(content);
+            return token;
+        case CLASS_KEYWORD:
+        case CLASS_OPERATOR:
+        case CLASS_PUNCTUATOR:
+            strcpy(token->content.c, content);
+            return token;
+        default:
+            return NULL;
+    }
+}
+
+int main() {
+    /*Regnode* S = regexp_to_regnode("(a|b)*abb#");*/
+    /*regnode_print(S);*/
+    /*printf("\n");*/
+
+    /*State* nfa = regnode_to_nfa(S, 1);*/
+    /*print_nfa(nfa);*/
 
     /*NFA_run(&nfa, "aabb#abb#");*/
     /*NFA_run(&nfa, "abb#");*/
     /*NFA_run(&nfa, "");*/
     /*NFA_run(&nfa, "ascas");*/
-    /*NFA_run(&nfa, "Aascas");*/
+    /*state_destroy(nfa);*/
+    /*regnode_destroy(S);*/
 
-    /*NFA_run(&nfa, "123");*/
-    /*NFA_run(&nfa, "123E5");*/
-    /*NFA_run(&nfa, "123E-102");*/
-    /*NFA_run(&nfa, "123ER10");*/
+    Symbol_Table* table = symbol_table_init();
+    Lex* lex = lex_init("test.c", lex_post_process);
+    lex_append_rule(lex, "\\w+"               , 1); // White Space
+    lex_append_rule(lex, "(_|\\z)(_|\\z|\\d)*", 2); // Identifier
+    lex_append_rule(lex, "\\d+"               , 3); // Number
+    lex_append_rule(lex, "auto|else|long|switch|         \
+                          break|enum|register|typedef|   \
+                          case|extern|restrict|union|    \
+                          char|float|return|unsigned|    \
+                          const|for|short|void|          \
+                          continue|goto|signed|volatile| \
+                          default|if|sizeof|while|       \
+                          do|inline|static|              \
+                          double|int|struct"  , 4); // Key Word
+    lex_append_rule(lex, "[|]|->|.| \
+                          \\+|-|\\*|/|&|~|\\+\\+|--|    \
+                          >>|<<|>|<|>=|<=|==|!=|        \
+                          &|\\||^|&&|\\|\\||!|\\?|:|    \
+                          =|\\+=|-=|\\*=|/=|%=|>>=|<<=| \
+                          &=|\\|=|^=|,"       , 5); // Operator
+    lex_append_rule(lex, ",|;|\\(|\\)|{|}"    , 6); // Punctuators
 
-    /*NFA_run(&nfa, "123");*/
-    /*NFA_run(&nfa, "123.");*/
-    /*NFA_run(&nfa, "123.123");*/
-    /*NFA_run(&nfa, "123.1.23");*/
+    for (uint16_t count = 0; count < 10; ++count) {
+        Token* token = lex_get_token(lex, table);
+        if (!token)
+            break;
+        switch (token->class) {
+            case CLASS_WHITE:
+                printf("HAIYAA\n");
+                break;
+            case CLASS_IDENTIFIER:
+                printf("ID  %s\n", token->content.s->content);
+                break;
+            case CLASS_NUMBER:
+                printf("NUM %ld\n", token->content.d);
+                break;
+            case CLASS_KEYWORD:
+                printf("KEY %s\n", token->content.c);
+                break;
+            case CLASS_OPERATOR:
+                printf("OPE %s\n", token->content.c);
+                break;
+            case CLASS_PUNCTUATOR:
+                printf("PUN %s\n", token->content.c);
+                break;
+        }
+    }
 
-    NFA_run(nfa, "");
-    NFA_run(nfa, "a");
-    NFA_run(nfa, "abc");
-    NFA_run(nfa, "ac");
-    state_destroy(nfa);
+    lex_destroy(lex);
 
     return 0;
 }
